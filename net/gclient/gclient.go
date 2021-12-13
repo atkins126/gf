@@ -4,7 +4,8 @@
 // If a copy of the MIT was not distributed with this file,
 // You can obtain one at https://github.com/gogf/gf.
 
-package client
+// Package gclient provides convenient http client functionalities.
+package gclient
 
 import (
 	"context"
@@ -15,9 +16,11 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/gogf/gf/v2/net/gtrace"
 	"golang.org/x/net/proxy"
 
 	"github.com/gogf/gf/v2"
@@ -31,7 +34,6 @@ import (
 // Client is the HTTP client for HTTP request management.
 type Client struct {
 	http.Client                         // Underlying HTTP Client.
-	dump              bool              // Mark this request will be dumped.
 	header            map[string]string // Custom header map.
 	cookies           map[string]string // Custom cookie map.
 	prefix            string            // Prefix for request.
@@ -43,12 +45,13 @@ type Client struct {
 }
 
 var (
-	defaultClientAgent = fmt.Sprintf(`GoFrameHTTPClient %s`, gf.VERSION)
+	host, _            = os.Hostname()
+	defaultClientAgent = fmt.Sprintf(`GClient %s at %s`, gf.VERSION, host)
 )
 
 // New creates and returns a new HTTP client object.
 func New() *Client {
-	client := &Client{
+	c := &Client{
 		Client: http.Client{
 			Transport: &http.Transport{
 				// No validation for https certification of the server in default.
@@ -61,8 +64,12 @@ func New() *Client {
 		header:  make(map[string]string),
 		cookies: make(map[string]string),
 	}
-	client.header["User-Agent"] = defaultClientAgent
-	return client
+	c.header["User-Agent"] = defaultClientAgent
+	// It enables OpenTelemetry for client if tracing feature is enabled.
+	if gtrace.IsEnabled() {
+		c.Use(MiddlewareTracing)
+	}
+	return c
 }
 
 // Clone deeply clones current client and returns a new one.
@@ -131,12 +138,6 @@ func (c *Client) SetHeaderRaw(headers string) *Client {
 // SetCookie sets a cookie pair for the client.
 func (c *Client) SetCookie(key, value string) *Client {
 	c.cookies[key] = value
-	return c
-}
-
-// SetDump enables/disables dump feature for this request.
-func (c *Client) SetDump(dump bool) *Client {
-	c.dump = dump
 	return c
 }
 

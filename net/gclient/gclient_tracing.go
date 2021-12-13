@@ -4,14 +4,16 @@
 // If a copy of the MIT was not distributed with this file,
 // You can obtain one at https://github.com/gogf/gf.
 
-package client
+package gclient
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptrace"
 
+	"github.com/gogf/gf/v2/os/gctx"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -19,33 +21,47 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/gogf/gf/v2"
+	"github.com/gogf/gf/v2/internal/httputil"
 	"github.com/gogf/gf/v2/internal/utils"
-	"github.com/gogf/gf/v2/net/ghttp/internal/httputil"
 	"github.com/gogf/gf/v2/net/gtrace"
 	"github.com/gogf/gf/v2/text/gstr"
 	"github.com/gogf/gf/v2/util/gconv"
 )
 
 const (
-	tracingInstrumentName           = "github.com/gogf/gf/v2/net/ghttp.Client"
-	tracingAttrHttpAddressRemote    = "http.address.remote"
-	tracingAttrHttpAddressLocal     = "http.address.local"
-	tracingAttrHttpDnsStart         = "http.dns.start"
-	tracingAttrHttpDnsDone          = "http.dns.done"
-	tracingAttrHttpConnectStart     = "http.connect.start"
-	tracingAttrHttpConnectDone      = "http.connect.done"
-	tracingEventHttpRequest         = "http.request"
-	tracingEventHttpRequestHeaders  = "http.request.headers"
-	tracingEventHttpRequestBaggage  = "http.request.baggage"
-	tracingEventHttpRequestBody     = "http.request.body"
-	tracingEventHttpResponse        = "http.response"
-	tracingEventHttpResponseHeaders = "http.response.headers"
-	tracingEventHttpResponseBody    = "http.response.body"
+	tracingInstrumentName                       = "github.com/gogf/gf/v2/net/gclient.Client"
+	tracingAttrHttpAddressRemote                = "http.address.remote"
+	tracingAttrHttpAddressLocal                 = "http.address.local"
+	tracingAttrHttpDnsStart                     = "http.dns.start"
+	tracingAttrHttpDnsDone                      = "http.dns.done"
+	tracingAttrHttpConnectStart                 = "http.connect.start"
+	tracingAttrHttpConnectDone                  = "http.connect.done"
+	tracingEventHttpRequest                     = "http.request"
+	tracingEventHttpRequestHeaders              = "http.request.headers"
+	tracingEventHttpRequestBaggage              = "http.request.baggage"
+	tracingEventHttpRequestBody                 = "http.request.body"
+	tracingEventHttpResponse                    = "http.response"
+	tracingEventHttpResponseHeaders             = "http.response.headers"
+	tracingEventHttpResponseBody                = "http.response.body"
+	tracingMiddlewareHandled        gctx.StrKey = `MiddlewareClientTracingHandled`
 )
 
 // MiddlewareTracing is a client middleware that enables tracing feature using standards of OpenTelemetry.
 func MiddlewareTracing(c *Client, r *http.Request) (response *Response, err error) {
-	tr := otel.GetTracerProvider().Tracer(tracingInstrumentName, trace.WithInstrumentationVersion(gf.VERSION))
+	var (
+		ctx = r.Context()
+	)
+	// Mark this request is handled by server tracing middleware,
+	// to avoid repeated handling by the same middleware.
+	if ctx.Value(tracingMiddlewareHandled) != nil {
+		return c.Next(r)
+	}
+
+	ctx = context.WithValue(ctx, tracingMiddlewareHandled, 1)
+	tr := otel.GetTracerProvider().Tracer(
+		tracingInstrumentName,
+		trace.WithInstrumentationVersion(gf.VERSION),
+	)
 	ctx, span := tr.Start(r.Context(), r.URL.String(), trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 

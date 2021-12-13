@@ -24,8 +24,11 @@ import (
 )
 
 const (
-	tagNameDc = `dc`
-	tagNameAd = `ad`
+	tagNameDc   = `dc`
+	tagNameAd   = `ad`
+	tagNameEg   = `eg`
+	tagNameArg  = `arg`
+	tagNameRoot = `root`
 )
 
 var (
@@ -34,7 +37,7 @@ var (
 )
 
 // NewFromObject creates and returns a root command object using given object.
-func NewFromObject(object interface{}) (rootCmd Command, err error) {
+func NewFromObject(object interface{}) (rootCmd *Command, err error) {
 	originValueAndKind := utils.OriginValueAndKind(object)
 	if originValueAndKind.OriginKind != reflect.Struct {
 		err = gerror.Newf(
@@ -50,26 +53,34 @@ func NewFromObject(object interface{}) (rootCmd Command, err error) {
 	}
 	// Sub command creating.
 	var (
-		nameSet     = gset.NewStrSet()
-		subCommands []Command
+		nameSet         = gset.NewStrSet()
+		rootCommandName = gmeta.Get(object, tagNameRoot).String()
+		subCommands     []*Command
 	)
+	if rootCommandName == "" {
+		rootCommandName = rootCmd.Name
+	}
 	for i := 0; i < originValueAndKind.InputValue.NumMethod(); i++ {
 		var (
-			method        = originValueAndKind.InputValue.Method(i)
-			methodCommand Command
+			method    = originValueAndKind.InputValue.Method(i)
+			methodCmd *Command
 		)
-		methodCommand, err = newCommandFromMethod(object, method)
+		methodCmd, err = newCommandFromMethod(object, method)
 		if err != nil {
 			return
 		}
-		if nameSet.Contains(methodCommand.Name) {
+		if nameSet.Contains(methodCmd.Name) {
 			err = gerror.Newf(
 				`command name should be unique, found duplicated command name in method "%s"`,
 				method.Type().String(),
 			)
 			return
 		}
-		subCommands = append(subCommands, methodCommand)
+		if rootCommandName == methodCmd.Name {
+			methodToRootCmdWhenNameEqual(rootCmd, methodCmd)
+		} else {
+			subCommands = append(subCommands, methodCmd)
+		}
 	}
 	if len(subCommands) > 0 {
 		err = rootCmd.AddCommand(subCommands...)
@@ -77,7 +88,40 @@ func NewFromObject(object interface{}) (rootCmd Command, err error) {
 	return
 }
 
-func newCommandFromObjectMeta(object interface{}) (command Command, err error) {
+func methodToRootCmdWhenNameEqual(rootCmd *Command, methodCmd *Command) {
+	if rootCmd.Usage == "" {
+		rootCmd.Usage = methodCmd.Usage
+	}
+	if rootCmd.Brief == "" {
+		rootCmd.Brief = methodCmd.Brief
+	}
+	if rootCmd.Description == "" {
+		rootCmd.Description = methodCmd.Description
+	}
+	if rootCmd.Examples == "" {
+		rootCmd.Examples = methodCmd.Examples
+	}
+	if rootCmd.Func == nil {
+		rootCmd.Func = methodCmd.Func
+	}
+	if rootCmd.FuncWithValue == nil {
+		rootCmd.FuncWithValue = methodCmd.FuncWithValue
+	}
+	if rootCmd.HelpFunc == nil {
+		rootCmd.HelpFunc = methodCmd.HelpFunc
+	}
+	if len(rootCmd.Arguments) == 0 {
+		rootCmd.Arguments = methodCmd.Arguments
+	}
+	if !rootCmd.Strict {
+		rootCmd.Strict = methodCmd.Strict
+	}
+	if rootCmd.Config == "" {
+		rootCmd.Config = methodCmd.Config
+	}
+}
+
+func newCommandFromObjectMeta(object interface{}) (command *Command, err error) {
 	var (
 		metaData = gmeta.Data(object)
 	)
@@ -102,13 +146,16 @@ func newCommandFromObjectMeta(object interface{}) (command Command, err error) {
 	if command.Description == "" {
 		command.Description = metaData[tagNameDc]
 	}
+	if command.Examples == "" {
+		command.Examples = metaData[tagNameEg]
+	}
 	if command.Additional == "" {
 		command.Additional = metaData[tagNameAd]
 	}
 	return
 }
 
-func newCommandFromMethod(object interface{}, method reflect.Value) (command Command, err error) {
+func newCommandFromMethod(object interface{}, method reflect.Value) (command *Command, err error) {
 	var (
 		reflectType = method.Type()
 	)
@@ -179,13 +226,15 @@ func newCommandFromMethod(object interface{}, method reflect.Value) (command Com
 	}
 
 	// Options creating.
-	if command.Options, err = newOptionsFromInput(inputObject.Interface()); err != nil {
+	if command.Arguments, err = newArgumentsFromInput(inputObject.Interface()); err != nil {
 		return
 	}
 
+	// =============================================================================================
 	// Create function that has value return.
+	// =============================================================================================
 	command.FuncWithValue = func(ctx context.Context, parser *Parser) (out interface{}, err error) {
-		ctx = context.WithValue(ctx, CtxKeyParser, command)
+		ctx = context.WithValue(ctx, CtxKeyParser, parser)
 
 		defer func() {
 			if exception := recover(); exception != nil {
@@ -199,15 +248,26 @@ func newCommandFromMethod(object interface{}, method reflect.Value) (command Com
 
 		var (
 			data        = gconv.Map(parser.GetOptAll())
+			argIndex    = 0
+			arguments   = gconv.Strings(ctx.Value(CtxKeyArguments))
 			inputValues = []reflect.Value{reflect.ValueOf(ctx)}
 		)
 		if data == nil {
 			data = map[string]interface{}{}
 		}
 		// Handle orphan options.
-		for _, option := range command.Options {
-			if option.Orphan && parser.ContainsOpt(option.Name) {
-				data[option.Name] = "true"
+		for _, arg := range command.Arguments {
+			if arg.IsArg {
+				// Read argument from command line index.
+				if argIndex < len(arguments) {
+					data[arg.Name] = arguments[argIndex]
+					argIndex++
+				}
+			} else {
+				// Read argument from command line option name.
+				if arg.Orphan && parser.ContainsOpt(arg.Name) {
+					data[arg.Name] = "true"
+				}
 			}
 		}
 		// Default values from struct tag.
@@ -228,7 +288,7 @@ func newCommandFromMethod(object interface{}, method reflect.Value) (command Com
 
 		// Parameters validation.
 		if err = gvalid.New().Bail().Data(inputObject.Interface()).Assoc(data).Run(ctx); err != nil {
-			err = gerror.Current(err)
+			err = gerror.Wrapf(gerror.Current(err), `arguments validation failed for command "%s"`, command.Name)
 			return
 		}
 		inputValues = append(inputValues, inputObject)
@@ -246,9 +306,11 @@ func newCommandFromMethod(object interface{}, method reflect.Value) (command Com
 	return
 }
 
-func newOptionsFromInput(object interface{}) (options []Option, err error) {
+func newArgumentsFromInput(object interface{}) (args []Argument, err error) {
 	var (
-		fields []gstructs.Field
+		fields   []gstructs.Field
+		nameSet  = gset.NewStrSet()
+		shortSet = gset.NewStrSet()
 	)
 	fields, err = gstructs.Fields(gstructs.FieldsInput{
 		Pointer:         object,
@@ -256,29 +318,51 @@ func newOptionsFromInput(object interface{}) (options []Option, err error) {
 	})
 	for _, field := range fields {
 		var (
-			option   = Option{}
+			arg      = Argument{}
 			metaData = field.TagMap()
 		)
-		if err = gconv.Scan(metaData, &option); err != nil {
+		if err = gconv.Scan(metaData, &arg); err != nil {
 			return nil, err
 		}
-		if option.Name == "" {
-			option.Name = field.Name()
+		if arg.Name == "" {
+			arg.Name = field.Name()
 		}
-		if option.Name == helpOptionName {
+		if arg.Name == helpOptionName {
 			return nil, gerror.Newf(
-				`option name "%s" is already token by built-in options`,
-				option.Name,
+				`argument name "%s" defined in "%s.%s" is already token by built-in arguments`,
+				arg.Name, reflect.TypeOf(object).String(), field.Name(),
 			)
 		}
-		if option.Short == helpOptionNameShort {
+		if arg.Short == helpOptionNameShort {
 			return nil, gerror.Newf(
-				`short option name "%s" is already token by built-in options`,
-				option.Short,
+				`short argument name "%s" defined in "%s.%s" is already token by built-in arguments`,
+				arg.Short, reflect.TypeOf(object).String(), field.Name(),
 			)
 		}
-		options = append(options, option)
+		if v, ok := metaData[tagNameArg]; ok {
+			arg.IsArg = gconv.Bool(v)
+		}
+		if nameSet.Contains(arg.Name) {
+			return nil, gerror.Newf(
+				`argument name "%s" defined in "%s.%s" is already token by other argument`,
+				arg.Name, reflect.TypeOf(object).String(), field.Name(),
+			)
+		}
+		nameSet.Add(arg.Name)
+
+		if arg.Short != "" {
+			if shortSet.Contains(arg.Short) {
+				return nil, gerror.Newf(
+					`short argument name "%s" defined in "%s.%s" is already token by other argument`,
+					arg.Short, reflect.TypeOf(object).String(), field.Name(),
+				)
+			}
+			shortSet.Add(arg.Short)
+		}
+
+		args = append(args, arg)
 	}
+
 	return
 }
 

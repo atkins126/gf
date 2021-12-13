@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/gogf/gf/v2/os/gcfg"
 	"github.com/gogf/gf/v2/text/gstr"
+	"github.com/gogf/gf/v2/util/gconv"
+	"github.com/gogf/gf/v2/util/gutil"
 )
 
 // Run calls custom function that bound to this command.
@@ -30,19 +33,15 @@ func (c *Command) RunWithValue(ctx context.Context) (value interface{}, err erro
 	}
 	args := parser.GetArgAll()
 	if len(args) == 1 {
-		// If no arguments passed but binary name, it then prints help.
-		if c.HelpFunc != nil {
-			return nil, c.HelpFunc(ctx, parser)
-		}
-		return nil, c.defaultHelpFunc(ctx, parser)
+		return c.doRun(ctx, parser)
 	}
 
 	// Exclude the root binary name.
 	args = args[1:]
 
 	// Find the matched command and run it.
-	if subCommand := c.searchCommand(args); subCommand != nil {
-		return subCommand.doRun(ctx, parser)
+	if subCommand, newCtx := c.searchCommand(ctx, args); subCommand != nil {
+		return subCommand.doRun(newCtx, parser)
 	}
 
 	// Print error and help command if no command found.
@@ -57,6 +56,8 @@ func (c *Command) RunWithValue(ctx context.Context) (value interface{}, err erro
 }
 
 func (c *Command) doRun(ctx context.Context, parser *Parser) (value interface{}, err error) {
+	ctx = context.WithValue(ctx, CtxKeyCommand, c)
+
 	// Check built-in help command.
 	if parser.ContainsOpt(helpOptionName) || parser.ContainsOpt(helpOptionNameShort) {
 		if c.HelpFunc != nil {
@@ -85,34 +86,90 @@ func (c *Command) doRun(ctx context.Context, parser *Parser) (value interface{},
 
 // reParse re-parses the arguments using option configuration of current command.
 func (c *Command) reParse(ctx context.Context, parser *Parser) (*Parser, error) {
+	if len(c.Arguments) == 0 {
+		return parser, nil
+	}
 	var (
 		optionKey        string
 		supportedOptions = make(map[string]bool)
 	)
-	for _, option := range c.Options {
-		if option.Short != "" {
-			optionKey = fmt.Sprintf(`%s,%s`, option.Name, option.Short)
-		} else {
-			optionKey = option.Name
+	for _, arg := range c.Arguments {
+		if arg.IsArg {
+			continue
 		}
-		supportedOptions[optionKey] = !option.Orphan
+		if arg.Short != "" {
+			optionKey = fmt.Sprintf(`%s,%s`, arg.Name, arg.Short)
+		} else {
+			optionKey = arg.Name
+		}
+		supportedOptions[optionKey] = !arg.Orphan
 	}
-	return Parse(supportedOptions, c.Strict)
+	parser, err := Parse(supportedOptions, c.Strict)
+	if err != nil {
+		return nil, err
+	}
+	// Retrieve option values from config component if it has "config" tag.
+	if c.Config != "" && gcfg.Instance().Available(ctx) {
+		value, err := gcfg.Instance().Get(ctx, c.Config)
+		if err != nil {
+			return nil, err
+		}
+		configMap := value.Map()
+		for optionName, _ := range parser.passedOptions {
+			// The command line has the high priority.
+			if parser.ContainsOpt(optionName) {
+				continue
+			}
+			// Merge the config value into parser.
+			foundKey, foundValue := gutil.MapPossibleItemByKey(configMap, optionName)
+			if foundKey != "" {
+				parser.parsedOptions[optionName] = gconv.String(foundValue)
+			}
+		}
+	}
+	return parser, nil
 }
 
 // searchCommand recursively searches the command according given arguments.
-func (c *Command) searchCommand(args []string) *Command {
+func (c *Command) searchCommand(ctx context.Context, args []string) (*Command, context.Context) {
 	if len(args) == 0 {
-		return nil
+		return nil, ctx
 	}
 	for _, cmd := range c.commands {
+
+		// Recursively searching the command.
 		if cmd.Name == args[0] {
 			leftArgs := args[1:]
-			if len(leftArgs) == 0 {
-				return &cmd
+			// If this command needs argument,
+			// it then gives all its left arguments to it.
+			if cmd.hasArgumentFromIndex() {
+				ctx = context.WithValue(ctx, CtxKeyArguments, leftArgs)
+				return cmd, ctx
 			}
-			return cmd.searchCommand(leftArgs)
+			// Recursively searching.
+			if len(leftArgs) == 0 {
+				return cmd, ctx
+			}
+			return cmd.searchCommand(ctx, leftArgs)
 		}
 	}
-	return nil
+	return nil, ctx
+}
+
+func (c *Command) hasArgumentFromIndex() bool {
+	for _, arg := range c.Arguments {
+		if arg.IsArg {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Command) hasArgumentFromOption() bool {
+	for _, arg := range c.Arguments {
+		if !arg.IsArg {
+			return true
+		}
+	}
+	return false
 }

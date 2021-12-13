@@ -15,8 +15,8 @@ import (
 	"github.com/gogf/gf/v2/encoding/gjson"
 	"github.com/gogf/gf/v2/errors/gcode"
 	"github.com/gogf/gf/v2/errors/gerror"
+	"github.com/gogf/gf/v2/internal/command"
 	"github.com/gogf/gf/v2/internal/intlog"
-	"github.com/gogf/gf/v2/os/gcmd"
 	"github.com/gogf/gf/v2/os/gfile"
 	"github.com/gogf/gf/v2/os/gfsnotify"
 	"github.com/gogf/gf/v2/os/gres"
@@ -40,11 +40,15 @@ var (
 	supportedFileTypes     = []string{"toml", "yaml", "yml", "json", "ini", "xml"} // All supported file types suffixes.
 	localInstances         = gmap.NewStrAnyMap(true)                               // Instances map containing configuration instances.
 	customConfigContentMap = gmap.NewStrStrMap(true)                               // Customized configuration content.
+
 	// Prefix array for trying searching in resource manager.
 	resourceTryFiles = []string{
 		"", "/", "config/", "config", "/config", "/config/",
 		"manifest/config/", "manifest/config", "/manifest/config", "/manifest/config/",
 	}
+
+	// Prefix array for trying searching in local system.
+	localSystemTryFiles = []string{"", "config/", "manifest/config"}
 )
 
 // NewAdapterFile returns a new configuration management object.
@@ -58,7 +62,7 @@ func NewAdapterFile(file ...string) (*AdapterFile, error) {
 		name = file[0]
 	} else {
 		// Custom default configuration file name from command line or environment.
-		if customFile := gcmd.GetOptWithEnv(commandEnvKeyForFile).String(); customFile != "" {
+		if customFile := command.GetOptWithEnv(commandEnvKeyForFile); customFile != "" {
 			name = customFile
 		}
 	}
@@ -68,7 +72,7 @@ func NewAdapterFile(file ...string) (*AdapterFile, error) {
 		jsonMap:     gmap.NewStrAnyMap(true),
 	}
 	// Customized dir path from env/cmd.
-	if customPath := gcmd.GetOptWithEnv(commandEnvKeyForPath).String(); customPath != "" {
+	if customPath := command.GetOptWithEnv(commandEnvKeyForPath); customPath != "" {
 		if gfile.Exists(customPath) {
 			if err = c.SetPath(customPath); err != nil {
 				return nil, err
